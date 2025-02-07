@@ -1,0 +1,9 @@
+[package]
+name = "zjs"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+v8 = "130.0.7"
+tokio = { version = "1.43.0", features = ["full"] }
+dashmap = "6.1.0"
