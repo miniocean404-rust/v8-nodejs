@@ -1,7 +1,6 @@
-async function main() {
-  const file = await fs.openFile("./text.txt")
-  const fileContent = await file.content()
-  await file.seek(0)
-  await file.write(fileContent + "\n hello world")
-  print(await file.content())
+import { b } from "./b.js"
+import { c } from "./c.js"
+
+export async function main() {
+  print(b + c)
 }

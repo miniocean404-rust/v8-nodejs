@@ -1,10 +1,9 @@
+use dashmap::DashMap;
 use std::{
     future::Future,
     ptr::NonNull,
     sync::atomic::{AtomicU32, Ordering},
 };
-
-use dashmap::DashMap;
 use v8::{Global, Local, Promise, PromiseResolver};
 
 pub trait AsyncTaskDispatcher: Default {
@@ -143,6 +142,8 @@ impl AsyncTaskDispatcher for TokioAsyncTaskManager {
                         promise_resolver.open(scope).reject(scope, v8_value);
                     }
                 }
+
+                isolate.perform_microtask_checkpoint();
             }
         }
     }

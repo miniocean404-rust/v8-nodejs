@@ -1,8 +1,8 @@
+use super::async_task;
+use async_task::{create_async_task_from_scope, AsyncTaskResult, AsyncTaskValue};
 use std::os::fd::{FromRawFd, IntoRawFd};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use v8::{Global, ObjectTemplate};
-
-use crate::async_task::{create_async_task_from_scope, AsyncTaskResult, AsyncTaskValue};
 
 fn extract_internal_field_file_handler(
     scope: &mut v8::HandleScope<'_>,

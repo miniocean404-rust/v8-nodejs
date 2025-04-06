@@ -3,6 +3,7 @@ use zjs::JsRuntime;
 #[tokio::main]
 async fn main() {
     let mut runtime = JsRuntime::new();
-    let code = include_str!("./example.js");
-    runtime.execute(code).await;
+    let current_dir = std::env::current_dir().unwrap();
+    let entry_script_path = current_dir.join("examples/example.js");
+    runtime.execute(&entry_script_path.to_string_lossy()).await;
 }

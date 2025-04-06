@@ -1,8 +1,10 @@
-mod async_task;
-mod fs;
+mod builtin;
+mod global;
 
-use async_task::{AsyncTaskDispatcher, TokioAsyncTaskManager};
-use fs::create_fs;
+use builtin::async_task::{AsyncTaskDispatcher, TokioAsyncTaskManager};
+use builtin::fs::create_fs;
+use global::inject_global_values;
+use global::module_loader::ModuleLoader;
 use v8::{self, ContextOptions, Local, OwnedIsolate, Value};
 
 pub struct JsRuntime<D: AsyncTaskDispatcher = TokioAsyncTaskManager> {
@@ -27,13 +29,15 @@ impl<D: AsyncTaskDispatcher> Default for JsRuntime<D> {
     }
 }
 
-fn print(
-    scope: &mut v8::HandleScope,
-    args: v8::FunctionCallbackArguments,
-    _return_value: v8::ReturnValue,
-) {
-    let value = args.get(0).to_string(scope).unwrap();
-    println!("{}", value.to_rust_string_lossy(scope));
+// TODO
+fn host_import_module_dynamically_callback_example<'s>(
+    scope: &mut v8::HandleScope<'s>,
+    host_defined_options: v8::Local<'s, v8::Data>,
+    resource_name: v8::Local<'s, v8::Value>,
+    specifier: v8::Local<'s, v8::String>,
+    import_assertions: v8::Local<'s, v8::FixedArray>,
+) -> Option<v8::Local<'s, v8::Promise>> {
+    todo!()
 }
 
 impl JsRuntime {
@@ -41,7 +45,7 @@ impl JsRuntime {
         Self::default()
     }
 
-    pub async fn execute(&mut self, code: &str) -> Local<'_, Value> {
+    pub async fn execute(&mut self, entry_script_path: &str) -> Local<'_, Value> {
         let isolate_ptr = &mut self.isolate as *mut OwnedIsolate;
 
         let scope = &mut v8::HandleScope::new(unsafe { &mut *isolate_ptr });
@@ -49,12 +53,10 @@ impl JsRuntime {
         self.isolate
             .set_data(0, &self.task_dispatcher as *const _ as *mut _);
 
-        let global_template = v8::ObjectTemplate::new(scope);
+        let module_loader = ModuleLoader::inject_into_isolate(&mut self.isolate);
 
-        // 添加全局 print 函数
-        let print_name = v8::String::new(scope, "print").unwrap();
-        let print_func = v8::FunctionTemplate::new(scope, print);
-        global_template.set(print_name.into(), print_func.into());
+        let global_template = v8::ObjectTemplate::new(scope);
+        inject_global_values(scope, &global_template);
 
         // 添加 fs 模块
         let fs = create_fs(scope);
@@ -68,18 +70,26 @@ impl JsRuntime {
             },
         );
 
+        self.isolate.set_host_import_module_dynamically_callback(
+            host_import_module_dynamically_callback_example,
+        );
+
         let scope = &mut v8::ContextScope::new(scope, context);
 
-        let source = v8::String::new(scope, code).unwrap();
-        let script = v8::Script::compile(scope, source, None).unwrap();
+        let module = module_loader
+            .create_first_module(scope, entry_script_path)
+            .unwrap();
+        module.evaluate(scope).unwrap();
 
-        // 运行脚本获取全局对象
-        script.run(scope).unwrap();
+        let module_namespace = module.get_module_namespace();
 
-        // 从全局对象获取 main 函数
-        let global = context.global(scope);
-        let main_str = v8::String::new(scope, "main").unwrap();
-        let main_fn = global.get(scope, main_str.into()).unwrap();
+        let main_fn_name = v8::String::new(scope, "main").unwrap();
+
+        let main_fn = module_namespace
+            .to_object(scope)
+            .unwrap()
+            .get(scope, main_fn_name.into())
+            .unwrap();
 
         if !main_fn.is_function() {
             panic!("main function not found");
