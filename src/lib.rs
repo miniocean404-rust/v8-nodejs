@@ -59,10 +59,6 @@ impl JsRuntime {
         let global_template = v8::ObjectTemplate::new(scope);
         inject_global_values(scope, &global_template);
 
-        // 添加 fs 模块
-        let fs = create_fs(scope);
-        global_template.set(v8::String::new(scope, "fs").unwrap().into(), fs.into());
-
         let context = v8::Context::new(
             scope,
             ContextOptions {
@@ -101,8 +97,6 @@ impl JsRuntime {
             panic!("main function not found");
         }
 
-        // 调用 main 函数
-        println!("run main function");
         let undefined = v8::undefined(scope);
         let result = main_fn
             .cast::<v8::Function>()
