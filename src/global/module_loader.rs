@@ -1,11 +1,12 @@
 use std::{
     collections::BTreeMap,
-    fs::{self, File},
-    io::Read,
+    fs::{self},
     path::{Path, PathBuf},
 };
 
-use v8::Module;
+use v8::CallbackScope;
+
+use crate::builtin::fs::create_fs;
 
 pub struct ModuleLoader {
     // Maps module identity hash to its absolute path
@@ -13,6 +14,8 @@ pub struct ModuleLoader {
     // Caches compiled modules by absolute path
     // Use v8::Global to store modules across different scopes
     module_cache: BTreeMap<PathBuf, v8::Global<v8::Module>>,
+
+    builtin_modules: BTreeMap<String, v8::Global<v8::Module>>,
 }
 
 impl ModuleLoader {
@@ -20,6 +23,7 @@ impl ModuleLoader {
         let module_loader = Box::into_raw(Box::new(Self {
             id_to_path_map: BTreeMap::new(),
             module_cache: BTreeMap::new(),
+            builtin_modules: BTreeMap::new(),
         }));
         isolate.set_data(1, module_loader as *mut _);
         unsafe { &mut *module_loader }
@@ -33,19 +37,27 @@ impl ModuleLoader {
     ) -> Option<(v8::Local<'s, v8::Module>, i32)> {
         let source = v8::String::new(scope, code)?;
 
+        let file_url = v8::String::new(scope, "file://").unwrap();
         let resource_name = v8::String::new(scope, resource_name_str)?.into();
+
+        // Create an Array to hold host-defined options
+        let host_defined_options = v8::PrimitiveArray::new(scope, 1);
+        host_defined_options.set(scope, 0, file_url.into());
+        // We don't need to cast to PrimitiveArray, Array is a subclass of Data
+        // let host_defined_options: v8::Local<v8::PrimitiveArray> = host_defined_options_arr.cast();
+
         let script_origin = v8::ScriptOrigin::new(
             scope,
             resource_name,
-            0,     // line_offset
-            0,     // column_offset
-            false, // is_cross_origin
-            0,     // script_id
-            None,  // source_map_url
-            false, // is_opaque
-            false, // is_wasm
-            true,  // is_module
-            None,  // host_defined_options
+            0,
+            0,
+            false,
+            0,
+            None,
+            false,
+            false,
+            true,
+            Some(host_defined_options.into()), // host_defined_options (now an Array, cast to Data)
         );
 
         let mut source = v8::script_compiler::Source::new(source, Some(&script_origin));
@@ -136,6 +148,50 @@ impl ModuleLoader {
 
         self.get_or_compile_module(scope, &absolute_path)
     }
+
+    fn init_builtin_module(
+        scope: &mut v8::HandleScope<'_>,
+        specifier_str: &str,
+    ) -> v8::Global<v8::Module> {
+        let fs_module_name = v8::String::new(scope, specifier_str).unwrap();
+
+        let export_names = &[v8::String::new(scope, "default").unwrap()];
+
+        let module = v8::Module::create_synthetic_module(
+            scope,
+            fs_module_name,
+            export_names,
+            |context: v8::Local<'_, v8::Context>, module: v8::Local<'_, v8::Module>| {
+                let mut scope = unsafe { CallbackScope::new(context) };
+                let default_export_name = v8::String::new(&mut scope, "default").unwrap();
+                let fs_module = create_fs(&mut scope);
+                let value = fs_module.new_instance(&mut scope).unwrap();
+
+                let result = module.set_synthetic_module_export(
+                    &mut scope,
+                    default_export_name,
+                    value.into(),
+                );
+
+                result.map(|result| v8::Boolean::new(&mut scope, result).into())
+            },
+        );
+
+        v8::Global::new(scope, module)
+    }
+
+    pub fn load_builtin_module<'s>(
+        &mut self,
+        scope: &mut v8::HandleScope<'s>,
+        specifier_str: &str,
+    ) -> Option<v8::Local<'s, v8::Module>> {
+        let module = self
+            .builtin_modules
+            .entry(specifier_str.to_string())
+            .or_insert_with(|| Self::init_builtin_module(scope, specifier_str));
+
+        Some(v8::Local::new(scope, &*module))
+    }
 }
 
 pub fn resolve_module_callback<'s>(
@@ -155,54 +211,51 @@ pub fn resolve_module_callback<'s>(
 
     let specifier_str = specifier.to_rust_string_lossy(&mut scope);
 
-    // Handle built-in modules (specifiers without path structure)
     if !specifier_str.starts_with('.') && !specifier_str.starts_with('/') {
-        // TODO: Implement built-in module loading logic here
-        // For now, return None or handle specific known built-ins
-        println!(
-            "Attempted to import non-path specifier (built-in?): {}",
-            specifier_str
-        );
-        return None;
+        // Handle built-in modules (specifiers without path structure)
+        return module_loader.load_builtin_module(&mut scope, &specifier_str);
     }
 
-    // Get the identity hash of the referrer module
     let referrer_id: i32 = referrer.get_identity_hash().into();
+    let referrer_path = module_loader.id_to_path_map.get(&referrer_id)?;
 
-    // Find the absolute path of the referrer module
-    let referrer_path = match module_loader.id_to_path_map.get(&referrer_id) {
-        Some(path) => path.clone(),
-        None => {
-            // This might happen if the referrer module itself failed compilation/instantiation
-            // or wasn't processed by our get_or_compile_module.
-            // We need the referrer's path to resolve relative specifiers.
-            eprintln!(
-                "Error: Could not find path for referrer module ID: {} (Resource Name: '{}'). Cannot resolve relative path '{}'.",
-                referrer_id, specifier_str, specifier_str
-            );
-            return None; // Cannot resolve relative paths without referrer's path
-        }
-    };
-
-    // Resolve the specifier relative to the referrer's directory
-    let referrer_dir = referrer_path.parent().unwrap_or_else(|| Path::new("")); // Use empty path if no parent (e.g., root file)
+    let referrer_dir = referrer_path.parent().unwrap_or(Path::new(""));
     let resolved_path_buf = referrer_dir.join(&specifier_str);
 
-    // Canonicalize the resolved path to handle '..' and ensure it's absolute
-    match fs::canonicalize(&resolved_path_buf) {
-        Ok(absolute_path) => {
-            // Use the core logic to get or compile the module. This will now hit the cache if available.
-            module_loader.get_or_compile_module(&mut scope, &absolute_path)
-        }
-        Err(e) => {
-            eprintln!(
-                "Error resolving or canonicalizing path '{}' (from '{}') relative to '{}': {}",
-                specifier_str,
-                resolved_path_buf.display(),
-                referrer_path.display(),
-                e
-            );
-            None
-        }
+    const EXTENSIONS: [&str; 2] = ["", "js"];
+
+    EXTENSIONS
+        .iter()
+        .find_map(|extension| {
+            let mut resolved_path_with_extension = resolved_path_buf.clone();
+            resolved_path_with_extension.set_extension(extension);
+            fs::canonicalize(&resolved_path_with_extension).ok()
+        })
+        .and_then(|path| module_loader.get_or_compile_module(&mut scope, &path))
+}
+
+pub extern "C" fn host_initialize_import_meta_object_callback(
+    context: v8::Local<'_, v8::Context>,
+    module: v8::Local<'_, v8::Module>,
+    meta: v8::Local<'_, v8::Object>,
+) {
+    let mut scope = unsafe { v8::CallbackScope::new(context) };
+    let state_ptr = scope.get_data(1);
+    if state_ptr.is_null() {
+        eprintln!("Error: ModuleLoader state is null in resolve_module_callback.");
+        return;
     }
+    let module_loader = unsafe { &mut *(state_ptr as *mut ModuleLoader) };
+
+    let module_id: i32 = module.get_identity_hash().into();
+    let dir_name = module_loader
+        .id_to_path_map
+        .get(&module_id)
+        .unwrap()
+        .parent()
+        .unwrap();
+
+    let key = v8::String::new(&mut scope, "dirname").unwrap();
+    let dir_name_str = v8::String::new(&mut scope, dir_name.to_str().unwrap()).unwrap();
+    meta.set(&mut scope, key.into(), dir_name_str.into());
 }

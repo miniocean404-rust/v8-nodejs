@@ -1,9 +1,21 @@
+use std::{io, path::Path};
 use zjs::JsRuntime;
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut runtime = JsRuntime::new();
-    let current_dir = std::env::current_dir().unwrap();
-    let entry_script_path = current_dir.join("examples/example.js");
-    runtime.execute(&entry_script_path.to_string_lossy()).await;
+
+    let filename = file!();
+    let path = Path::new(filename);
+
+    let not_found_error = || Box::new(io::Error::new(io::ErrorKind::NotFound, "File not found"));
+    let dirname = path.parent().ok_or_else(not_found_error)?;
+
+    let example_main_js_filepath = dirname.join("./js/main.js");
+
+    runtime
+        .execute(&example_main_js_filepath.to_string_lossy())
+        .await;
+
+    Ok(())
 }

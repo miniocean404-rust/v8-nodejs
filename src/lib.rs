@@ -1,10 +1,11 @@
 mod builtin;
 mod global;
+mod helper;
 
 use builtin::async_task::{AsyncTaskDispatcher, TokioAsyncTaskManager};
 use builtin::fs::create_fs;
 use global::inject_global_values;
-use global::module_loader::ModuleLoader;
+use global::module_loader::{host_initialize_import_meta_object_callback, ModuleLoader};
 use v8::{self, ContextOptions, Local, OwnedIsolate, Value};
 
 pub struct JsRuntime<D: AsyncTaskDispatcher = TokioAsyncTaskManager> {
@@ -73,6 +74,11 @@ impl JsRuntime {
         self.isolate.set_host_import_module_dynamically_callback(
             host_import_module_dynamically_callback_example,
         );
+
+        self.isolate
+            .set_host_initialize_import_meta_object_callback(
+                host_initialize_import_meta_object_callback,
+            );
 
         let scope = &mut v8::ContextScope::new(scope, context);
 
