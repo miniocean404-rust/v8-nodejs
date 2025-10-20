@@ -6,6 +6,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut runtime = JsRuntime::new();
 
     let filename = file!();
+
     let path = Path::new(filename);
 
     let not_found_error = || Box::new(io::Error::new(io::ErrorKind::NotFound, "File not found"));

@@ -3,7 +3,6 @@ mod global;
 mod helper;
 
 use builtin::async_task::{AsyncTaskDispatcher, TokioAsyncTaskManager};
-use builtin::fs::create_fs;
 use global::inject_global_values;
 use global::module_loader::{host_initialize_import_meta_object_callback, ModuleLoader};
 use v8::{self, ContextOptions, Local, OwnedIsolate, Value};
