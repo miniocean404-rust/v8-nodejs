@@ -106,7 +106,7 @@ impl JsRuntime {
             .unwrap();
         module.evaluate(scope).unwrap(); // 执行模块（顶级代码）
 
-        let module_namespace = module.get_module_namespace(); // 获取模块导出的命名空间
+        let module_namespace = module.get_module_namespace(); // 获取 js 模块导出的命名空间
 
         let main_fn_name = v8::String::new(scope, "main").unwrap(); // 创建字符串 "main"
 
