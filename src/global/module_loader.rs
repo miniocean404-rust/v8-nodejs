@@ -1,142 +1,170 @@
 use std::{
-    collections::BTreeMap,
-    fs::{self},
-    path::{Path, PathBuf},
+    collections::BTreeMap, // 有序键值对映射
+    fs::{self},            // 文件系统操作
+    path::{Path, PathBuf}, // 路径操作
 };
 
 use v8::CallbackScope;
 
-use crate::builtin::fs::create_fs;
+use crate::builtin::fs::create_fs; // 文件系统模块
 
+/// 模块加载器 - 管理 JS 模块的加载、编译、缓存和依赖解析
 pub struct ModuleLoader {
-    // Maps module identity hash to its absolute path
+    // 映射模块的唯一标识哈希值到其绝对路径
+    // 用于在模块回调中快速查询模块信息
     id_to_path_map: BTreeMap<i32, PathBuf>,
-    // Caches compiled modules by absolute path
-    // Use v8::Global to store modules across different scopes
+
+    // 模块缓存 - 根据绝对路径缓存已编译的模块
+    // 使用 v8::Global 以便在不同作用域中存储模块
     module_cache: BTreeMap<PathBuf, v8::Global<v8::Module>>,
 
+    // 内置模块存储 - 按名称缓存内置模块（如 "fs"）
     builtin_modules: BTreeMap<String, v8::Global<v8::Module>>,
 }
 
 impl ModuleLoader {
+    /// 将 ModuleLoader 注入到 V8 隔离区的 slot 1
+    ///
+    /// 返回一个静态可变引用（使用不安全代码）
     pub fn inject_into_isolate(isolate: &mut v8::Isolate) -> &'static mut ModuleLoader {
         let module_loader = Box::into_raw(Box::new(Self {
-            id_to_path_map: BTreeMap::new(),
-            module_cache: BTreeMap::new(),
-            builtin_modules: BTreeMap::new(),
+            id_to_path_map: BTreeMap::new(),  // 初始化空映射
+            module_cache: BTreeMap::new(),    // 初始化空缓存
+            builtin_modules: BTreeMap::new(), // 初始化空内置模块
         }));
-        isolate.set_data(1, module_loader as *mut _);
-        unsafe { &mut *module_loader }
+        isolate.set_data(1, module_loader as *mut _); // 存储指针到隔离区 slot 1
+        unsafe { &mut *module_loader } // 返回可变引用
     }
 
-    // Helper function to compile a script into a V8 module and return the module and its ID
+    /// 编译脚本代码为 V8 模块
+    ///
+    /// # 参数
+    /// - `scope`: V8 作用域
+    /// - `code`: JS 源代码
+    /// - `resource_name_str`: 资源名称（用于错误信息和调试）
+    ///
+    /// # 返回
+    /// 返回编译后的模块和其唯一标识哈希值的元组
     fn compile_script_module<'s>(
         scope: &mut v8::HandleScope<'s>,
-        code: &str,
-        resource_name_str: &str,
+        code: &str,              // JS 源代码
+        resource_name_str: &str, // 资源名称（调试用）
     ) -> Option<(v8::Local<'s, v8::Module>, i32)> {
-        let source = v8::String::new(scope, code)?;
+        let source = v8::String::new(scope, code)?; // 创建源代码字符串
 
-        let file_url = v8::String::new(scope, "file://").unwrap();
-        let resource_name = v8::String::new(scope, resource_name_str)?.into();
+        let file_url = v8::String::new(scope, "file://").unwrap(); // 文件 URL 前缀
+        let resource_name = v8::String::new(scope, resource_name_str)?.into(); // 资源名称
 
-        // Create an Array to hold host-defined options
-        let host_defined_options = v8::PrimitiveArray::new(scope, 1);
-        host_defined_options.set(scope, 0, file_url.into());
-        // We don't need to cast to PrimitiveArray, Array is a subclass of Data
-        // let host_defined_options: v8::Local<v8::PrimitiveArray> = host_defined_options_arr.cast();
+        // 创建主机定义的选项数组
+        let host_defined_options = v8::PrimitiveArray::new(scope, 1); // 创建大小为 1 的原始数组
+        host_defined_options.set(scope, 0, file_url.into()); // 第 0 个元素设为 "file://"
 
+        // 创建脚本来源信息
         let script_origin = v8::ScriptOrigin::new(
             scope,
-            resource_name,
-            0,
-            0,
-            false,
-            0,
-            None,
-            false,
-            false,
-            true,
-            Some(host_defined_options.into()), // host_defined_options (now an Array, cast to Data)
+            resource_name,                     // 资源名
+            0,                                 // 行偏移
+            0,                                 // 列偏移
+            false,                             // 是否是共享代码
+            0,                                 // 脚本 ID
+            None,                              // 源映射 URL
+            false,                             // 是否是 WASM
+            false,                             // 是否是模块
+            true,                              // 主要脚本
+            Some(host_defined_options.into()), // 主机定义选项
         );
 
-        let mut source = v8::script_compiler::Source::new(source, Some(&script_origin));
+        let mut source = v8::script_compiler::Source::new(source, Some(&script_origin)); // 创建源对象
 
+        // 编译为 ES6 模块
         v8::script_compiler::compile_module(scope, &mut source).map(|module| {
-            let hash_id: i32 = module.get_identity_hash().into();
-            (module, hash_id)
+            let hash_id: i32 = module.get_identity_hash().into(); // 获取模块唯一哈希 ID
+            (module, hash_id) // 返回模块和 ID
         })
     }
 
-    // Core function to get a compiled module, using cache or compiling on demand
+    /// 核心函数：获取或编译模块（使用缓存或按需编译）
+    ///
+    /// # 参数
+    /// - `scope`: V8 作用域
+    /// - `absolute_path`: 模块的绝对路径
+    ///
+    /// # 返回
+    /// 返回本地作用域中的模块引用
     fn get_or_compile_module<'s>(
         &mut self,
         scope: &mut v8::HandleScope<'s>,
-        absolute_path: &Path,
+        absolute_path: &Path, // 绝对路径
     ) -> Option<v8::Local<'s, v8::Module>> {
         let absolute_path_buf = absolute_path.to_path_buf();
 
-        // Check if the module is already cached
+        // 检查模块是否已在缓存中
         if let Some(global_module) = self.module_cache.get(&absolute_path_buf) {
-            // Return the local handle from the global cache
+            // 从全局缓存返回本地引用
             return Some(v8::Local::new(scope, global_module));
         }
 
-        // Module not in cache, read and compile
+        // 模块不在缓存中，读取并编译
         let content = match fs::read_to_string(absolute_path) {
             Ok(content) => content,
             Err(e) => {
-                eprintln!("Error reading file '{}': {}", absolute_path.display(), e);
+                eprintln!("Error reading file '{}': {}", absolute_path.display(), e); // 错误日志
                 return None;
             }
         };
 
-        let resource_name_str = absolute_path.to_str().unwrap_or("unknown.js");
+        let resource_name_str = absolute_path.to_str().unwrap_or("unknown.js"); // 获取文件名
 
         if let Some((module, hash_id)) =
             Self::compile_script_module(scope, &content, resource_name_str)
+        // 编译模块
         {
-            // Store the mapping from hash ID to path (needed for resolving)
+            // 存储 ID 到路径的映射（在依赖解析时需要）
             self.id_to_path_map
                 .insert(hash_id, absolute_path_buf.clone());
 
-            // Instantiate the module before caching (important step)
-            // Need to handle potential instantiation errors.
+            // 实例化模块（重要步骤）
+            // 需要处理可能的实例化错误
             if module
-                .instantiate_module(scope, resolve_module_callback)
+                .instantiate_module(scope, resolve_module_callback) // 实例化模块，指定依赖解析函数
                 .is_none()
             {
                 eprintln!(
                     "Error: Failed to instantiate module: {}",
                     absolute_path.display()
                 );
-                // Don't cache if instantiation fails
+                // 如果实例化失败则不缓存
                 return None;
             }
 
-            // Create a global handle and store it in the cache
-            let global_module = v8::Global::new(scope, module);
-            self.module_cache.insert(absolute_path_buf, global_module); // Add to module cache
+            // 创建全局句柄并存储到缓存
+            let global_module = v8::Global::new(scope, module); // 包装为 Global（跨作用域）
+            self.module_cache.insert(absolute_path_buf, global_module); // 缓存模块
 
-            Some(module) // Return the local handle for the current scope
+            Some(module) // 返回本地作用域中的句柄
         } else {
             eprintln!(
                 "Error: Failed to compile module: {}",
                 absolute_path.display()
             );
-            None // Compilation failed
+            None // 编译失败
         }
     }
 
+    /// 创建入口模块
+    ///
+    /// # 参数
+    /// - `scope`: V8 作用域
+    /// - `path_str`: 路径字符串（可以是相对路径或绝对路径）
     pub fn create_first_module<'s>(
         &mut self,
         scope: &mut v8::HandleScope<'s>,
-        path_str: &str,
+        path_str: &str, // 路径字符串
     ) -> Option<v8::Local<'s, v8::Module>> {
-        // Canonicalize the path to get an absolute path
-        let path = Path::new(path_str);
+        // 规范化路径为绝对路径
+        let path = Path::new(path_str); // 创建路径对象
         let absolute_path = match fs::canonicalize(path) {
-            Ok(p) => p,
+            Ok(p) => p, // 成功规范化
             Err(e) => {
                 eprintln!(
                     "Error canonicalizing entry point path '{}': {}",
@@ -146,27 +174,33 @@ impl ModuleLoader {
             }
         };
 
-        self.get_or_compile_module(scope, &absolute_path)
+        self.get_or_compile_module(scope, &absolute_path) // 获取或编译模块
     }
 
+    /// 初始化内置模块
+    ///
+    /// 创建一个合成的 V8 模块，由 Rust 代码实现
     fn init_builtin_module(
         scope: &mut v8::HandleScope<'_>,
-        specifier_str: &str,
+        specifier_str: &str, // 模块名称
     ) -> v8::Global<v8::Module> {
-        let fs_module_name = v8::String::new(scope, specifier_str).unwrap();
+        let fs_module_name = v8::String::new(scope, specifier_str).unwrap(); // 模块名称字符串
 
-        let export_names = &[v8::String::new(scope, "default").unwrap()];
+        let export_names = &[v8::String::new(scope, "default").unwrap()]; // 导出名称
 
+        // 创建合成模块（由 Rust 代码实现的模块）
         let module = v8::Module::create_synthetic_module(
             scope,
-            fs_module_name,
-            export_names,
+            fs_module_name, // 模块名
+            export_names,   // 导出项名
             |context: v8::Local<'_, v8::Context>, module: v8::Local<'_, v8::Module>| {
-                let mut scope = unsafe { CallbackScope::new(context) };
-                let default_export_name = v8::String::new(&mut scope, "default").unwrap();
-                let fs_module = create_fs(&mut scope);
-                let value = fs_module.new_instance(&mut scope).unwrap();
+                // 初始化回调
+                let mut scope = unsafe { CallbackScope::new(context) }; // 从上下文创建作用域
+                let default_export_name = v8::String::new(&mut scope, "default").unwrap(); // "default" 字符串
+                let fs_module = create_fs(&mut scope); // 创建文件系统模块
+                let value = fs_module.new_instance(&mut scope).unwrap(); // 创建模块实例
 
+                // 设置 default 导出
                 let result = module.set_synthetic_module_export(
                     &mut scope,
                     default_export_name,
@@ -174,88 +208,110 @@ impl ModuleLoader {
                 );
 
                 result.map(|result| v8::Boolean::new(&mut scope, result).into())
+                // 返回布尔值
             },
         );
 
-        v8::Global::new(scope, module)
+        v8::Global::new(scope, module) // 包装为 Global
     }
 
+    /// 加载内置模块（如 "fs"）
+    ///
+    /// 如果模块未缓存则初始化，否则从缓存获取
     pub fn load_builtin_module<'s>(
         &mut self,
         scope: &mut v8::HandleScope<'s>,
-        specifier_str: &str,
+        specifier_str: &str, // 模块名称
     ) -> Option<v8::Local<'s, v8::Module>> {
         let module = self
             .builtin_modules
-            .entry(specifier_str.to_string())
-            .or_insert_with(|| Self::init_builtin_module(scope, specifier_str));
+            .entry(specifier_str.to_string()) // 从字典获取或插入
+            .or_insert_with(|| Self::init_builtin_module(scope, specifier_str)); // 不存在则初始化
 
-        Some(v8::Local::new(scope, &*module))
+        Some(v8::Local::new(scope, &*module)) // 返回本地引用
     }
 }
 
+/// 模块依赖解析回调函数
+///
+/// 当 JavaScript 模块中包含 import/export 语句时，V8 会调用此函数来解析依赖
+///
+/// # 参数
+/// - `context`: V8 上下文
+/// - `specifier`: import 的模块路径
+/// - `_import_assertions`: import 断言（通常未使用）
+/// - `referrer`: 导入者模块
 pub fn resolve_module_callback<'s>(
     context: v8::Local<'s, v8::Context>,
-    specifier: v8::Local<'s, v8::String>,
-    _import_assertions: v8::Local<'s, v8::FixedArray>,
-    referrer: v8::Local<'s, v8::Module>,
+    specifier: v8::Local<'s, v8::String>, // import 的模块路径
+    _import_assertions: v8::Local<'s, v8::FixedArray>, // import 断言（未使用）
+    referrer: v8::Local<'s, v8::Module>,  // 导入者模块
 ) -> Option<v8::Local<'s, v8::Module>> {
-    let mut scope = unsafe { v8::CallbackScope::new(context) };
-    // Correctly retrieve the ModuleLoader instance stored in the isolate data slot.
-    let state_ptr = scope.get_data(1);
+    let mut scope = unsafe { v8::CallbackScope::new(context) }; // 创建作用域
+                                                                // 从隔离区 slot 1 获取 ModuleLoader 实例
+    let state_ptr = scope.get_data(1); // 获取 ModuleLoader 指针
     if state_ptr.is_null() {
         eprintln!("Error: ModuleLoader state is null in resolve_module_callback.");
         return None;
     }
-    let module_loader = unsafe { &mut *(state_ptr as *mut ModuleLoader) };
+    let module_loader = unsafe { &mut *(state_ptr as *mut ModuleLoader) }; // 转换为引用
 
-    let specifier_str = specifier.to_rust_string_lossy(&mut scope);
+    let specifier_str = specifier.to_rust_string_lossy(&mut scope); // 模块路径字符串
 
+    // 判断是否为内置模块（不含路径分隔符）
     if !specifier_str.starts_with('.') && !specifier_str.starts_with('/') {
-        // Handle built-in modules (specifiers without path structure)
+        // 处理内置模块
         return module_loader.load_builtin_module(&mut scope, &specifier_str);
     }
 
-    let referrer_id: i32 = referrer.get_identity_hash().into();
-    let referrer_path = module_loader.id_to_path_map.get(&referrer_id)?;
+    let referrer_id: i32 = referrer.get_identity_hash().into(); // 导入者的 ID
+    let referrer_path = module_loader.id_to_path_map.get(&referrer_id)?; // 查询导入者路径
 
-    let referrer_dir = referrer_path.parent().unwrap_or(Path::new(""));
-    let resolved_path_buf = referrer_dir.join(&specifier_str);
+    let referrer_dir = referrer_path.parent().unwrap_or(Path::new("")); // 导入者目录
+    let resolved_path_buf = referrer_dir.join(&specifier_str); // 解析相对路径
 
-    const EXTENSIONS: [&str; 2] = ["", "js"];
+    // 支持的文件扩展名
+    const EXTENSIONS: [&str; 2] = ["", "js"]; // 尝试原文件名和 .js 扩展
 
     EXTENSIONS
         .iter()
         .find_map(|extension| {
+            // 逐个尝试扩展名
             let mut resolved_path_with_extension = resolved_path_buf.clone();
-            resolved_path_with_extension.set_extension(extension);
-            fs::canonicalize(&resolved_path_with_extension).ok()
+            resolved_path_with_extension.set_extension(extension); // 添加扩展名
+            fs::canonicalize(&resolved_path_with_extension).ok() // 规范化路径
         })
         .and_then(|path| module_loader.get_or_compile_module(&mut scope, &path))
+    // 编译模块
 }
 
+/// import.meta 对象初始化回调函数
+///
+/// 当 JavaScript 代码访问 import.meta 时，V8 会调用此函数来初始化该对象
+/// 这里我们将模块的目录名称设为 import.meta.dirname
 pub extern "C" fn host_initialize_import_meta_object_callback(
     context: v8::Local<'_, v8::Context>,
-    module: v8::Local<'_, v8::Module>,
-    meta: v8::Local<'_, v8::Object>,
+    module: v8::Local<'_, v8::Module>, // 当前模块
+    meta: v8::Local<'_, v8::Object>,   // import.meta 对象
 ) {
-    let mut scope = unsafe { v8::CallbackScope::new(context) };
-    let state_ptr = scope.get_data(1);
+    let mut scope = unsafe { v8::CallbackScope::new(context) }; // 创建作用域
+    let state_ptr = scope.get_data(1); // 获取 ModuleLoader
     if state_ptr.is_null() {
         eprintln!("Error: ModuleLoader state is null in resolve_module_callback.");
         return;
     }
     let module_loader = unsafe { &mut *(state_ptr as *mut ModuleLoader) };
 
-    let module_id: i32 = module.get_identity_hash().into();
+    let module_id: i32 = module.get_identity_hash().into(); // 模块 ID
     let dir_name = module_loader
         .id_to_path_map
-        .get(&module_id)
+        .get(&module_id) // 查询模块路径
         .unwrap()
-        .parent()
+        .parent() // 获取目录
         .unwrap();
 
-    let key = v8::String::new(&mut scope, "dirname").unwrap();
-    let dir_name_str = v8::String::new(&mut scope, dir_name.to_str().unwrap()).unwrap();
-    meta.set(&mut scope, key.into(), dir_name_str.into());
+    // 在 import.meta 上设置 dirname 属性
+    let key = v8::String::new(&mut scope, "dirname").unwrap(); // "dirname" 键
+    let dir_name_str = v8::String::new(&mut scope, dir_name.to_str().unwrap()).unwrap(); // 目录字符串
+    meta.set(&mut scope, key.into(), dir_name_str.into()); // 设置 meta.dirname
 }
