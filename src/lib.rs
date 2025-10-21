@@ -82,7 +82,7 @@ impl JsRuntime {
 
         inject_global_values(scope, &global_template);
 
-        // 创建 V8 执行上下文
+        // 创建 V8 执行上下文, 注入 global 方法
         let context = v8::Context::new(
             scope,
             ContextOptions {
@@ -111,8 +111,9 @@ impl JsRuntime {
 
         // 执行模块（顶级代码）
         module.evaluate(scope).unwrap();
+
         let module_namespace = module.get_module_namespace(); // 获取 js 模块导出的命名空间
-        let main_fn_name = v8::String::new(scope, "main").unwrap(); // 创建字符串 "main"
+        let main_fn_name = v8::String::new(scope, "main").unwrap();
 
         // 获取 main 函数
         let main_fn = module_namespace
@@ -128,7 +129,7 @@ impl JsRuntime {
 
         let undefined = v8::undefined(scope); // 创建 undefined 值
 
-        // 调用 main 函数（在 undefined 上下文中调用，无参数）
+        // 调用 main 函数（绑定 undefined 为函数的 this 参数，&[] 为参数列表）
         let result = main_fn
             .cast::<v8::Function>()
             .call(scope, undefined.into(), &[])
