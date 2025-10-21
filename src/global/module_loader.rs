@@ -27,13 +27,17 @@ impl ModuleLoader {
     ///
     /// 返回一个静态可变引用（使用不安全代码）
     pub fn inject_into_isolate(isolate: &mut v8::Isolate) -> &'static mut ModuleLoader {
+        // Box::into_raw 获取原始指针，手动管理内存，编译器不会自动管理
         let module_loader = Box::into_raw(Box::new(Self {
-            id_to_path_map: BTreeMap::new(),  // 初始化空映射
-            module_cache: BTreeMap::new(),    // 初始化空缓存
-            builtin_modules: BTreeMap::new(), // 初始化空内置模块
+            id_to_path_map: BTreeMap::new(),
+            module_cache: BTreeMap::new(),
+            builtin_modules: BTreeMap::new(),
         }));
-        isolate.set_data(1, module_loader as *mut _); // 存储指针到隔离区 slot 1
-        unsafe { &mut *module_loader } // 返回可变引用
+
+        // set_data() 允许你将任意数据与 V8 Isolate 关联起来，这些数据可以在后续的回调函数、JavaScript 执行过程中访问
+        isolate.set_data(1, module_loader as *mut _);
+
+        unsafe { &mut *module_loader }
     }
 
     /// 编译脚本代码为 V8 模块
@@ -50,28 +54,31 @@ impl ModuleLoader {
         code: &str,              // JS 源代码
         resource_name_str: &str, // 资源名称（调试用）
     ) -> Option<(v8::Local<'s, v8::Module>, i32)> {
-        let source = v8::String::new(scope, code)?; // 创建源代码字符串
+        // 创建源代码字符串
+        let source = v8::String::new(scope, code)?;
+        // 文件 URL 前缀
+        let file_url = v8::String::new(scope, "file://").unwrap();
+        // 文件路径
+        let resource_name = v8::String::new(scope, resource_name_str)?.into();
 
-        let file_url = v8::String::new(scope, "file://").unwrap(); // 文件 URL 前缀
-        let resource_name = v8::String::new(scope, resource_name_str)?.into(); // 资源名称
-
-        // 创建主机定义的选项数组
-        let host_defined_options = v8::PrimitiveArray::new(scope, 1); // 创建大小为 1 的原始数组
-        host_defined_options.set(scope, 0, file_url.into()); // 第 0 个元素设为 "file://"
+        // 创建主机定义的选项数组, PrimitiveArray: 原始数组, 创建大小为 1 的原始数组
+        let host_defined_options = v8::PrimitiveArray::new(scope, 1);
+        // 第 0 个元素设为 "file://"
+        host_defined_options.set(scope, 0, file_url.into());
 
         // 创建脚本来源信息
         let script_origin = v8::ScriptOrigin::new(
             scope,
-            resource_name,                     // 资源名
+            resource_name,                     // 文件路径
             0,                                 // 行偏移
             0,                                 // 列偏移
-            false,                             // 是否是共享代码
-            0,                                 // 脚本 ID
-            None,                              // 源映射 URL
-            false,                             // 是否是 WASM
-            false,                             // 是否是模块
-            true,                              // 主要脚本
-            Some(host_defined_options.into()), // 主机定义选项
+            false, // 是否是共享代码, 非信任脚本限制跨域访问, true 允许跨域访问此脚本的错误信息和堆栈跟踪
+            0, // 脚本 ID, 用于调试和性能分析, 调试器识别: 帮助开发工具识别不同的脚本、性能分析: 在性能分析器中区分脚本、缓存机制: V8 内部可能用于缓存编译结果
+            None, // sourcemap URL
+            false, // 是否是 WASM
+            false, // 是否是 wasm
+            true, // 是否是 esm 模块
+            Some(host_defined_options.into()), // 向 V8 传递自定义元数据、帮助模块加载器理解如何解析导入、定义脚本的执行权限、传递宿主环境特定的数据
         );
 
         let mut source = v8::script_compiler::Source::new(source, Some(&script_origin)); // 创建源对象
@@ -100,7 +107,7 @@ impl ModuleLoader {
 
         // 检查模块是否已在缓存中
         if let Some(global_module) = self.module_cache.get(&absolute_path_buf) {
-            // 从全局缓存返回本地引用
+            // 从全局缓存返回本地引用, v8::Local::new 用于在不同的 V8 作用域(Scope) 之间传递 JavaScript 值
             return Some(v8::Local::new(scope, global_module));
         }
 
@@ -113,40 +120,33 @@ impl ModuleLoader {
             }
         };
 
-        let resource_name_str = absolute_path.to_str().unwrap_or("unknown.js"); // 获取文件名
+        let resource_name_str = absolute_path.to_str().unwrap_or("unknown.js");
 
         if let Some((module, hash_id)) =
+            // 编译模块
             Self::compile_script_module(scope, &content, resource_name_str)
-        // 编译模块
         {
-            // 存储 ID 到路径的映射（在依赖解析时需要）
+            // 缓存 ID 到路径的映射（在依赖解析时需要）
             self.id_to_path_map
                 .insert(hash_id, absolute_path_buf.clone());
 
             // 实例化模块（重要步骤）
-            // 需要处理可能的实例化错误
             if module
                 .instantiate_module(scope, resolve_module_callback) // 实例化模块，指定依赖解析函数
                 .is_none()
             {
-                eprintln!(
-                    "Error: Failed to instantiate module: {}",
-                    absolute_path.display()
-                );
-                // 如果实例化失败则不缓存
+                eprintln!("错误: 实例化模块失败: {}", absolute_path.display());
                 return None;
             }
 
-            // 创建全局句柄并存储到缓存
-            let global_module = v8::Global::new(scope, module); // 包装为 Global（跨作用域）
-            self.module_cache.insert(absolute_path_buf, global_module); // 缓存模块
+            // 创建全局句柄并存储到缓存, v8::Global 用于在不同作用域中存储模块
+            let global_module = v8::Global::new(scope, module);
+            // 缓存模块
+            self.module_cache.insert(absolute_path_buf, global_module);
 
             Some(module) // 返回本地作用域中的句柄
         } else {
-            eprintln!(
-                "Error: Failed to compile module: {}",
-                absolute_path.display()
-            );
+            eprintln!("错误: 编译模块失败: {}", absolute_path.display());
             None // 编译失败
         }
     }
@@ -235,40 +235,34 @@ impl ModuleLoader {
 /// 模块依赖解析回调函数
 ///
 /// 当 JavaScript 模块中包含 import/export 语句时，V8 会调用此函数来解析依赖
-///
-/// # 参数
-/// - `context`: V8 上下文
-/// - `specifier`: import 的模块路径
-/// - `_import_assertions`: import 断言（通常未使用）
-/// - `referrer`: 导入者模块
 pub fn resolve_module_callback<'s>(
     context: v8::Local<'s, v8::Context>,
-    specifier: v8::Local<'s, v8::String>, // import 的模块路径
+    specifier: v8::Local<'s, v8::String>, // import 其他导入的模块路径
     _import_assertions: v8::Local<'s, v8::FixedArray>, // import 断言（未使用）
-    referrer: v8::Local<'s, v8::Module>,  // 导入者模块
+    referrer: v8::Local<'s, v8::Module>,  // 当前的文件引用
 ) -> Option<v8::Local<'s, v8::Module>> {
     let mut scope = unsafe { v8::CallbackScope::new(context) }; // 创建作用域
-                                                                // 从隔离区 slot 1 获取 ModuleLoader 实例
+
+    // 从隔离区 slot 1 获取 ModuleLoader 实例
     let state_ptr = scope.get_data(1); // 获取 ModuleLoader 指针
     if state_ptr.is_null() {
-        eprintln!("Error: ModuleLoader state is null in resolve_module_callback.");
+        eprintln!("错误: 在 resolve_module_callback 中的 ModuleLoader state 为空 ");
         return None;
     }
-    let module_loader = unsafe { &mut *(state_ptr as *mut ModuleLoader) }; // 转换为引用
 
+    let module_loader = unsafe { &mut *(state_ptr as *mut ModuleLoader) }; // 转换为引用
     let specifier_str = specifier.to_rust_string_lossy(&mut scope); // 模块路径字符串
 
     // 判断是否为内置模块（不含路径分隔符）
     if !specifier_str.starts_with('.') && !specifier_str.starts_with('/') {
-        // 处理内置模块
         return module_loader.load_builtin_module(&mut scope, &specifier_str);
     }
 
-    let referrer_id: i32 = referrer.get_identity_hash().into(); // 导入者的 ID
+    let referrer_id: i32 = referrer.get_identity_hash().into(); // 获取导入模块的 hash
     let referrer_path = module_loader.id_to_path_map.get(&referrer_id)?; // 查询导入者路径
 
     let referrer_dir = referrer_path.parent().unwrap_or(Path::new("")); // 导入者目录
-    let resolved_path_buf = referrer_dir.join(&specifier_str); // 解析相对路径
+    let resolved_path_buf = referrer_dir.join(&specifier_str); // 解析路径
 
     // 支持的文件扩展名
     const EXTENSIONS: [&str; 2] = ["", "js"]; // 尝试原文件名和 .js 扩展
@@ -282,30 +276,35 @@ pub fn resolve_module_callback<'s>(
             fs::canonicalize(&resolved_path_with_extension).ok() // 规范化路径
         })
         .and_then(|path| module_loader.get_or_compile_module(&mut scope, &path))
-    // 编译模块
 }
 
 /// import.meta 对象初始化回调函数
 ///
 /// 当 JavaScript 代码访问 import.meta 时，V8 会调用此函数来初始化该对象
 /// 这里我们将模块的目录名称设为 import.meta.dirname
+///
+/// extern "C" 是 Rust 中的外部函数接口 (FFI - Foreign Function Interface) 声明，用于与 C 语言 ABI (Application Binary Interface) 兼容、及防止名称被修改导致编译后 FFI 调用无法找到函数
 pub extern "C" fn host_initialize_import_meta_object_callback(
-    context: v8::Local<'_, v8::Context>,
-    module: v8::Local<'_, v8::Module>, // 当前模块
-    meta: v8::Local<'_, v8::Object>,   // import.meta 对象
+    context: v8::Local<'_, v8::Context>, // V8 执行上下文
+    module: v8::Local<'_, v8::Module>,   // 当前正在加载的模块
+    meta: v8::Local<'_, v8::Object>,     // import.meta 对象的引用
 ) {
     let mut scope = unsafe { v8::CallbackScope::new(context) }; // 创建作用域
-    let state_ptr = scope.get_data(1); // 获取 ModuleLoader
+
+    // 获取 ModuleLoader 管理的路径、模块、文件之间的关联
+    let state_ptr = scope.get_data(1);
+
     if state_ptr.is_null() {
-        eprintln!("Error: ModuleLoader state is null in resolve_module_callback.");
+        eprintln!("错误: 在 resolve_module_callback 中的 ModuleLoader state 为空 ");
         return;
     }
+
     let module_loader = unsafe { &mut *(state_ptr as *mut ModuleLoader) };
 
-    let module_id: i32 = module.get_identity_hash().into(); // 模块 ID
+    let module_id: i32 = module.get_identity_hash().into(); // 模块 hash
     let dir_name = module_loader
         .id_to_path_map
-        .get(&module_id) // 查询模块路径
+        .get(&module_id) // 根据模块 hash 查找文件路径
         .unwrap()
         .parent() // 获取目录
         .unwrap();

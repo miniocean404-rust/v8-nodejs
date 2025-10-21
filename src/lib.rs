@@ -11,7 +11,7 @@ use v8::{self, ContextOptions, Local, OwnedIsolate, Value}; // V8 类型
 ///
 /// 参数 D: 异步任务调度器（默认为 TokioAsyncTaskManager）
 pub struct JsRuntime<D: AsyncTaskDispatcher = TokioAsyncTaskManager> {
-    isolate: v8::OwnedIsolate, // V8 隔离区（独立的 JS 执行环境）
+    isolate: v8::OwnedIsolate, // V8 隔离区（独立的 JS 执行环境），自动管理 Isolate 的创建和销毁
     task_dispatcher: D,        // 异步任务调度器
 }
 
@@ -42,11 +42,11 @@ impl<D: AsyncTaskDispatcher> Default for JsRuntime<D> {
 /// - `specifier`: 模块标识符（import() 中的字符串）
 /// - `import_assertions`: import 断言（ES2023 功能）
 fn host_import_module_dynamically_callback_example<'s>(
-    scope: &mut v8::HandleScope<'s>,
-    host_defined_options: v8::Local<'s, v8::Data>,
-    resource_name: v8::Local<'s, v8::Value>,
-    specifier: v8::Local<'s, v8::String>,
-    import_assertions: v8::Local<'s, v8::FixedArray>,
+    _scope: &mut v8::HandleScope<'s>,
+    _host_defined_options: v8::Local<'s, v8::Data>,
+    _resource_name: v8::Local<'s, v8::Value>,
+    _specifier: v8::Local<'s, v8::String>,
+    _import_assertions: v8::Local<'s, v8::FixedArray>,
 ) -> Option<v8::Local<'s, v8::Promise>> {
     todo!() // 标记为未实现
 }
@@ -67,16 +67,20 @@ impl JsRuntime {
     pub async fn execute(&mut self, entry_script_path: &str) -> Local<'_, Value> {
         let isolate_ptr = &mut self.isolate as *mut OwnedIsolate; // 获取 isolate 的可变指针（用于 unsafe 操作）
 
-        let scope = &mut v8::HandleScope::new(unsafe { &mut *isolate_ptr }); // 创建作用域
+        // 在这个作用域内创建的所有 JavaScript 值都会被追踪, 当 scope 离开作用域时，自动清理未被引用的对象
+        let scope = &mut v8::HandleScope::new(unsafe { &mut *isolate_ptr });
 
         // 在 isolate 中存储异步任务管理器的指针（slot 0）
         self.isolate
             .set_data(0, &self.task_dispatcher as *const _ as *mut _);
 
-        let module_loader = ModuleLoader::inject_into_isolate(&mut self.isolate); // 创建并注入模块加载器
+        // 在隔离上下文中注入 module_loader 来管理路径、模块、文件之间的关联
+        let module_loader = ModuleLoader::inject_into_isolate(&mut self.isolate);
 
+        // v8::ObjectTemplate 允许你在 Rust 中预定义 JavaScript 对象的结构，包括属性、方法和访问器，然后基于这个模板快速创建多个相似的对象。
         let global_template = v8::ObjectTemplate::new(scope); // 创建全局对象模板
-        inject_global_values(scope, &global_template); // 注入全局值（如 print 函数）
+
+        inject_global_values(scope, &global_template);
 
         // 创建 V8 执行上下文
         let context = v8::Context::new(
@@ -87,12 +91,12 @@ impl JsRuntime {
             },
         );
 
-        // 设置动态 import() 的处理函数
+        // TODO: 设置动态 import() 的处理函数
         self.isolate.set_host_import_module_dynamically_callback(
             host_import_module_dynamically_callback_example,
         );
 
-        // 设置 import.meta 初始化函数
+        // 设置 import.meta 初始化函数, 为 import.meta.dirname 设置值
         self.isolate
             .set_host_initialize_import_meta_object_callback(
                 host_initialize_import_meta_object_callback,
@@ -104,10 +108,10 @@ impl JsRuntime {
         let module = module_loader
             .create_first_module(scope, entry_script_path)
             .unwrap();
-        module.evaluate(scope).unwrap(); // 执行模块（顶级代码）
 
+        // 执行模块（顶级代码）
+        module.evaluate(scope).unwrap();
         let module_namespace = module.get_module_namespace(); // 获取 js 模块导出的命名空间
-
         let main_fn_name = v8::String::new(scope, "main").unwrap(); // 创建字符串 "main"
 
         // 获取 main 函数
@@ -119,11 +123,12 @@ impl JsRuntime {
 
         // 检查是否确实是函数
         if !main_fn.is_function() {
-            panic!("main function not found"); // 如果不是函数则崩溃
+            panic!("main 函数不存在");
         }
 
         let undefined = v8::undefined(scope); // 创建 undefined 值
-                                              // 调用 main 函数（在 undefined 上下文中调用，无参数）
+
+        // 调用 main 函数（在 undefined 上下文中调用，无参数）
         let result = main_fn
             .cast::<v8::Function>()
             .call(scope, undefined.into(), &[])
