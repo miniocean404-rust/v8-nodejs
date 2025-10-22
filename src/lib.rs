@@ -8,7 +8,7 @@ use global::module_loader::{host_initialize_import_meta_object_callback, ModuleL
 use v8::{self, ContextOptions, Local, OwnedIsolate, Value};
 
 pub struct JsRuntime<D: AsyncTaskDispatcher = TokioAsyncTaskManager> {
-    // V8 隔离区（独立的 JS 执行环境），自动管理 Isolate 的创建和销毁
+    // V8 隔离区（独立的独立的堆内存 JS 执行环境）管理 JavaScript 对象的生命周期、堆内存管理、垃圾回收器、全局对象和上下文
     isolate: v8::OwnedIsolate,
     // 异步任务调度器
     task_dispatcher: D,
@@ -17,9 +17,12 @@ pub struct JsRuntime<D: AsyncTaskDispatcher = TokioAsyncTaskManager> {
 impl<D: AsyncTaskDispatcher> Default for JsRuntime<D> {
     // 初始化 V8 引擎
     fn default() -> Self {
-        let platform = v8::new_default_platform(0, false).make_shared(); // 创建 V8 平台，参数 0 表示线程数，false 表示不启用调试
-        v8::V8::initialize_platform(platform); // 初始化 V8 平台
-        v8::V8::initialize(); // 初始化 V8 引擎
+        // 创建 V8 平台，参数 0 表示线程数，false 表示不启用调试
+        let platform = v8::new_default_platform(0, false).make_shared();
+        // 初始化 V8 平台
+        v8::V8::initialize_platform(platform);
+        // 初始化 V8 引擎
+        v8::V8::initialize();
 
         // 创建 V8 隔离区（隔离的 JS 执行环境）
         let isolate = v8::Isolate::new(Default::default());
@@ -47,28 +50,21 @@ impl JsRuntime {
     /// 返回 main() 函数的执行结果
     pub async fn execute(&mut self, entry_script_path: &str) -> Local<'_, Value> {
         let isolate_ptr = &mut self.isolate as *mut OwnedIsolate; // 获取 isolate 的可变指针（用于 unsafe 操作）
+        let scope = &mut v8::HandleScope::new(unsafe { &mut *isolate_ptr }); // 在这个作用域内创建的所有 JavaScript 值都会被追踪, 当 scope 离开作用域时，自动清理未被引用的对象（临时的"工作台"，管理当前正在使用的 JavaScript 值的句柄）
 
-        // 在这个作用域内创建的所有 JavaScript 值都会被追踪, 当 scope 离开作用域时，自动清理未被引用的对象
-        let scope = &mut v8::HandleScope::new(unsafe { &mut *isolate_ptr });
+        let task_dispatcher_ptr = &self.task_dispatcher as *const _ as *mut _;
+        self.isolate.set_data(0, task_dispatcher_ptr); // 在 isolate 中存储异步任务管理器的指针, 以便后续 run_event_loop 时使用
+        let module_loader = ModuleLoader::init_and_inject(&mut self.isolate); // 在隔离上下文中注入 module_loader 来管理路径、模块、文件之间的关联
 
-        // 在 isolate 中存储异步任务管理器的指针（slot 0）
-        self.isolate
-            .set_data(0, &self.task_dispatcher as *const _ as *mut _);
+        let global_api_template = v8::ObjectTemplate::new(scope); // 创建对象模板, v8::ObjectTemplate 允许你在 Rust 中预定义 JavaScript 对象的结构，包括属性、方法和访问器，然后基于这个模板快速创建多个相似的对象。
+        inject_global_values(scope, &global_api_template); // 注入 Global API, 目前有 print 函数
 
-        // 在隔离上下文中注入 module_loader 来管理路径、模块、文件之间的关联
-        let module_loader = ModuleLoader::inject_into_isolate(&mut self.isolate);
-
-        // v8::ObjectTemplate 允许你在 Rust 中预定义 JavaScript 对象的结构，包括属性、方法和访问器，然后基于这个模板快速创建多个相似的对象。
-        let global_template = v8::ObjectTemplate::new(scope); // 创建全局对象模板
-
-        inject_global_values(scope, &global_template);
-
-        // 创建 V8 执行上下文, 注入 global 方法
+        // 创建 V8 执行上下文, 注入 Global API 方法
         let context = v8::Context::new(
             scope,
             ContextOptions {
-                global_template: global_template.into(), // 使用自定义全局模板
-                ..Default::default()                     // 其他选项使用默认值
+                global_template: global_api_template.into(), // 使用自定义全局模板
+                ..Default::default()                         // 其他选项使用默认值
             },
         );
 

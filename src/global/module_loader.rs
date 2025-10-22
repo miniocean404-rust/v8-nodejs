@@ -23,10 +23,14 @@ pub struct ModuleLoader {
 }
 
 impl ModuleLoader {
-    /// 将 ModuleLoader 注入到 V8 隔离区的 slot 1
+    /// 初始化 ModuleLoader，将 ModuleLoader 注入到 V8 隔离区的 1 位置的插槽中
     ///
+    /// # 参数
+    /// - `isolate`: V8 隔离区
+    ///
+    /// # 返回
     /// 返回一个静态可变引用（使用不安全代码）
-    pub fn inject_into_isolate(isolate: &mut v8::Isolate) -> &'static mut ModuleLoader {
+    pub fn init_and_inject(isolate: &mut v8::Isolate) -> &'static mut ModuleLoader {
         // Box::into_raw 获取原始指针，手动管理内存，编译器不会自动管理
         let module_loader = Box::into_raw(Box::new(Self {
             id_to_path_map: BTreeMap::new(),
@@ -289,19 +293,20 @@ pub extern "C" fn host_initialize_import_meta_object_callback(
     module: v8::Local<'_, v8::Module>,   // 当前正在加载的模块
     meta: v8::Local<'_, v8::Object>,     // import.meta 对象的引用
 ) {
-    let mut scope = unsafe { v8::CallbackScope::new(context) }; // 创建作用域
+    // 根据上下文创建作用域
+    let mut scope = unsafe { v8::CallbackScope::new(context) };
 
-    // 获取 ModuleLoader 管理的路径、模块、文件之间的关联
+    // 获取 ModuleLoader
     let state_ptr = scope.get_data(1);
-
     if state_ptr.is_null() {
-        eprintln!("错误: 在 resolve_module_callback 中的 ModuleLoader state 为空 ");
+        eprintln!("错误: 在 resolve_module_callback 中的 ModuleLoader 为空 ");
         return;
     }
-
     let module_loader = unsafe { &mut *(state_ptr as *mut ModuleLoader) };
 
-    let module_id: i32 = module.get_identity_hash().into(); // 模块 hash
+    // 模块 hash
+    let module_id: i32 = module.get_identity_hash().into();
+    // 根据模块 hash 查找文件夹
     let dir_name = module_loader
         .id_to_path_map
         .get(&module_id) // 根据模块 hash 查找文件路径
@@ -310,7 +315,9 @@ pub extern "C" fn host_initialize_import_meta_object_callback(
         .unwrap();
 
     // 在 import.meta 上设置 dirname 属性
-    let key = v8::String::new(&mut scope, "dirname").unwrap(); // "dirname" 键
-    let dir_name_str = v8::String::new(&mut scope, dir_name.to_str().unwrap()).unwrap(); // 目录字符串
-    meta.set(&mut scope, key.into(), dir_name_str.into()); // 设置 meta.dirname
+    let key = v8::String::new(&mut scope, "dirname").unwrap();
+    let dir_name_str = v8::String::new(&mut scope, dir_name.to_str().unwrap()).unwrap();
+
+    // 设置 meta.dirname
+    meta.set(&mut scope, key.into(), dir_name_str.into());
 }
