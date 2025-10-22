@@ -105,9 +105,9 @@ fn write_file(
     return_value.set(promise.into()); // 设置返回值为 Promise
 }
 
-/// 创建文件处理器对象模板
+/// 创建 File 对象模板
 ///
-/// 这个模板定义了文件对象暴露给 JavaScript 的方法
+/// 这个模板定义了 File 对象暴露给 JavaScript 的方法
 fn create_file_handler_template(scope: &mut v8::HandleScope<()>) -> v8::Global<ObjectTemplate> {
     let template = v8::ObjectTemplate::new(scope); // 创建 File 对象
     template.set_internal_field_count(1); // 设置内部字段数为 1（存放 File 对象指针）
@@ -220,11 +220,6 @@ fn open_file_handler(
     let path = args.get(0); // 获取文件路径参数
     let path_str = path.to_rust_string_lossy(scope); // 转换为字符串
 
-    // 提取模板并创建实例
-    let instance = extract_external_from_args::<ObjectTemplate>(&args)
-        .new_instance(scope)
-        .expect("不能实例化对象");
-
     /// Promise 映射函数 - 在异步任务完成时调用
     ///
     /// 获取文件描述符，创建文件处理器，存储到对象的内部字段
@@ -234,11 +229,16 @@ fn open_file_handler(
         mut return_value: v8::ReturnValue,
     ) {
         let fd = args.get(0).to_int32(scope).unwrap().value(); // 获取文件描述符
-        let instance = args.data().cast::<v8::Object>(); // 获取对象实例
+        let instance = args.data().cast::<v8::Object>(); // 获取 File 对象实例
         let file_handler = File::new(fd).to_v8_external(scope); // 创建文件处理器
         instance.set_internal_field(0, file_handler.into()); // 存储到内部字段
         return_value.set(instance.into()); // 返回 File 对象
     }
+
+    // 提取 file_handler_template 模板并创建实例
+    let instance = extract_external_from_args::<ObjectTemplate>(&args)
+        .new_instance(scope)
+        .expect("不能实例化对象");
 
     // 构建 Promise 映射函数
     let promise_mapper = v8::Function::builder(promise_mapper)
@@ -274,21 +274,21 @@ fn open_file_handler(
 ///
 /// 返回一个对象模板，暴露 openFile 方法给 JavaScript
 pub fn create_fs<'s>(scope: &mut v8::HandleScope<'s, ()>) -> v8::Local<'s, v8::ObjectTemplate> {
-    let fs = v8::ObjectTemplate::new(scope); // 创建对象模板
+    let fs: v8::Local<'_, ObjectTemplate> = v8::ObjectTemplate::new(scope); // 创建 fs 对象(是一个模板)
 
-    let file_handler_template = create_file_handler_template(scope); // 创建文件处理器模板
+    let file_handler_template = create_file_handler_template(scope); // 创建 File 对象(是一个模板)
     let file_handler_template_ptr = file_handler_template.into_raw(); // 获取原始指针
     let file_handler_template =
-        v8::External::new(scope, file_handler_template_ptr.as_ptr() as *mut _);
+        v8::External::new(scope, file_handler_template_ptr.as_ptr() as *mut _); // v8::External 允许将 C++ 对象的指针包装成 JavaScript 值，使其能在 JavaScript 环境中传递和存储。
 
     // 添加 openFile 方法
     fs.set(
         v8::String::new(scope, "openFile").unwrap().into(), // "openFile" 方法
         v8::FunctionTemplate::builder(open_file_handler) // 创建函数
-            .data(file_handler_template.into()) // 传递模板
-            .build(scope) // 构建
+            .data(file_handler_template.into()) // 将模板作为 data 传入, 可在 buider 回调中使用 args.data() 重新获取
+            .build(scope)
             .into(),
     );
 
-    fs // 返回 FS 模块对象
+    fs
 }

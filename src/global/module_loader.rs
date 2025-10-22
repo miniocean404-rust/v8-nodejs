@@ -55,25 +55,25 @@ impl ModuleLoader {
     /// 返回编译后的模块和其唯一标识哈希值的元组
     fn compile_script_module<'s>(
         scope: &mut v8::HandleScope<'s>,
-        code: &str,              // JS 源代码
-        resource_name_str: &str, // 资源名称（调试用）
+        code: &str,          // JS 源代码
+        resource_path: &str, // 资源路径
     ) -> Option<(v8::Local<'s, v8::Module>, i32)> {
         // 创建源代码字符串
         let source = v8::String::new(scope, code)?;
         // 文件 URL 前缀
         let file_url = v8::String::new(scope, "file://").unwrap();
         // 文件路径
-        let resource_name = v8::String::new(scope, resource_name_str)?.into();
+        let resource_path = v8::String::new(scope, resource_path)?.into();
 
         // 创建主机定义的选项数组, PrimitiveArray: 原始数组, 创建大小为 1 的原始数组
-        let host_defined_options = v8::PrimitiveArray::new(scope, 1);
+        let defined_meta_options = v8::PrimitiveArray::new(scope, 1);
         // 第 0 个元素设为 "file://"
-        host_defined_options.set(scope, 0, file_url.into());
+        defined_meta_options.set(scope, 0, file_url.into());
 
         // 创建脚本来源信息
         let script_origin = v8::ScriptOrigin::new(
             scope,
-            resource_name,                     // 文件路径
+            resource_path,                     // 文件路径
             0,                                 // 行偏移
             0,                                 // 列偏移
             false, // 是否是共享代码, 非信任脚本限制跨域访问, true 允许跨域访问此脚本的错误信息和堆栈跟踪
@@ -82,10 +82,10 @@ impl ModuleLoader {
             false, // 是否是 WASM
             false, // 是否是 wasm
             true, // 是否是 esm 模块
-            Some(host_defined_options.into()), // 向 V8 传递自定义元数据、帮助模块加载器理解如何解析导入、定义脚本的执行权限、传递宿主环境特定的数据
+            Some(defined_meta_options.into()), // 向 V8 传递自定义元数据、帮助模块加载器理解如何解析导入、定义脚本的执行权限、传递宿主环境特定的数据
         );
 
-        let mut source = v8::script_compiler::Source::new(source, Some(&script_origin)); // 创建源对象
+        let mut source = v8::script_compiler::Source::new(source, Some(&script_origin)); // 创建 js 代码源对象
 
         // 编译为 ES6 模块
         v8::script_compiler::compile_module(scope, &mut source).map(|module| {
@@ -124,11 +124,11 @@ impl ModuleLoader {
             }
         };
 
-        let resource_name_str = absolute_path.to_str().unwrap_or("unknown.js");
+        let resource_path = absolute_path.to_str().unwrap_or("unknown.js");
 
         if let Some((module, hash_id)) =
             // 编译模块
-            Self::compile_script_module(scope, &content, resource_name_str)
+            Self::compile_script_module(scope, &content, resource_path)
         {
             // 缓存 ID 到路径的映射（在依赖解析时需要）
             self.id_to_path_map
@@ -143,12 +143,12 @@ impl ModuleLoader {
                 return None;
             }
 
-            // 创建全局句柄并存储到缓存, v8::Global 用于在不同作用域中存储模块
+            // v8::Global 用于在 rust 中持有对 JavaScript 对象的持久引用, 以便于在不同作用域中存储模块
             let global_module = v8::Global::new(scope, module);
             // 缓存模块
             self.module_cache.insert(absolute_path_buf, global_module);
 
-            Some(module) // 返回本地作用域中的句柄
+            Some(module)
         } else {
             eprintln!("错误: 编译模块失败: {}", absolute_path.display());
             None // 编译失败
@@ -170,10 +170,7 @@ impl ModuleLoader {
         let absolute_path = match fs::canonicalize(path) {
             Ok(p) => p, // 成功规范化
             Err(e) => {
-                eprintln!(
-                    "Error canonicalizing entry point path '{}': {}",
-                    path_str, e
-                );
+                eprintln!("错误: 规范化入口点路径 '{}' 失败: {}", path_str, e);
                 return None;
             }
         };
@@ -232,7 +229,7 @@ impl ModuleLoader {
             .entry(specifier_str.to_string()) // 从字典获取或插入
             .or_insert_with(|| Self::init_builtin_module(scope, specifier_str)); // 不存在则初始化
 
-        Some(v8::Local::new(scope, &*module)) // 返回本地引用
+        Some(v8::Local::new(scope, &*module))
     }
 }
 
@@ -247,17 +244,15 @@ pub fn resolve_module_callback<'s>(
 ) -> Option<v8::Local<'s, v8::Module>> {
     let mut scope = unsafe { v8::CallbackScope::new(context) }; // 创建作用域
 
-    // 从隔离区 slot 1 获取 ModuleLoader 实例
     let state_ptr = scope.get_data(1); // 获取 ModuleLoader 指针
     if state_ptr.is_null() {
         eprintln!("错误: 在 resolve_module_callback 中的 ModuleLoader state 为空 ");
         return None;
     }
-
     let module_loader = unsafe { &mut *(state_ptr as *mut ModuleLoader) }; // 转换为引用
     let specifier_str = specifier.to_rust_string_lossy(&mut scope); // 模块路径字符串
 
-    // 判断是否为内置模块（不含路径分隔符）
+    // 判断是否为内置模块（不含路径分隔符）, 如果是内置模块则加载内置模块
     if !specifier_str.starts_with('.') && !specifier_str.starts_with('/') {
         return module_loader.load_builtin_module(&mut scope, &specifier_str);
     }

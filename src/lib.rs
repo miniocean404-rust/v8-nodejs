@@ -81,7 +81,7 @@ impl JsRuntime {
 
         let scope = &mut v8::ContextScope::new(scope, context); // 在新上下文中创建作用域
 
-        // 加载并编译入口模块
+        // 加载并编译 main 模块
         let module = module_loader
             .create_first_module(scope, entry_script_path)
             .unwrap();
