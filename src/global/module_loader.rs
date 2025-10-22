@@ -177,18 +177,17 @@ impl ModuleLoader {
         self.get_or_compile_module(scope, &absolute_path) // 获取或编译模块
     }
 
-    /// 初始化内置模块
+    /// 初始化内置 API, 例如 fs
     ///
-    /// 创建一个合成的 V8 模块，由 Rust 代码实现
+    /// 创建一个合成的 V8 API，由 Rust 代码实现
     fn init_builtin_module(
         scope: &mut v8::HandleScope<'_>,
         specifier_str: &str, // 模块名称
     ) -> v8::Global<v8::Module> {
         let fs_module_name = v8::String::new(scope, specifier_str).unwrap(); // 模块名称字符串
-
         let export_names = &[v8::String::new(scope, "default").unwrap()]; // 导出名称
 
-        // 创建合成模块（由 Rust 代码实现的模块）
+        // 创建模块（由 Rust 代码实现的模块）
         let module = v8::Module::create_synthetic_module(
             scope,
             fs_module_name, // 模块名
@@ -197,6 +196,7 @@ impl ModuleLoader {
                 // 初始化回调
                 let mut scope = unsafe { CallbackScope::new(context) }; // 从上下文创建作用域
                 let default_export_name = v8::String::new(&mut scope, "default").unwrap(); // "default" 字符串
+
                 let fs_module = create_fs(&mut scope); // 创建文件系统模块
                 let value = fs_module.new_instance(&mut scope).unwrap(); // 创建模块实例
 
@@ -221,7 +221,7 @@ impl ModuleLoader {
     pub fn load_builtin_module<'s>(
         &mut self,
         scope: &mut v8::HandleScope<'s>,
-        specifier_str: &str, // 模块名称
+        specifier_str: &str, // import 导入的模块名称
     ) -> Option<v8::Local<'s, v8::Module>> {
         let module = self
             .builtin_modules
