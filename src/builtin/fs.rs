@@ -4,6 +4,77 @@ use std::os::fd::{FromRawFd, IntoRawFd}; // 文件描述符操作
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt}; // 异步 I/O 特性
 use v8::{Global, ObjectTemplate};
 
+/// Rust 文件处理器包装
+///
+/// 将 tokio::fs::File 包装为可跨线程的对象
+struct File {
+    file_handler_ptr: *mut tokio::fs::File, // 文件指针
+}
+
+unsafe impl Send for File {} // 允许在线程间发送
+unsafe impl Sync for File {} // 允许多线程访问
+
+impl File {
+    /// 从文件描述符创建 File 对象
+    fn new(fd: i32) -> Self {
+        let file = unsafe { tokio::fs::File::from_raw_fd(fd) }; // 从 FD 创建 File
+        let file_handler_ptr = Box::into_raw(Box::new(file)); // 分配到堆并获取指针
+        Self { file_handler_ptr }
+    }
+
+    /// 异步读取文件的全部内容
+    async fn read_to_end(&self) -> Result<Vec<u8>, std::io::Error> {
+        let file = unsafe { &mut *self.file_handler_ptr }; // 解指针
+        let mut buf = Vec::new(); // 创建缓冲区
+        file.seek(tokio::io::SeekFrom::Start(0)).await?; // 寻址到开始
+        file.read_to_end(&mut buf).await?; // 读取到缓冲区
+        Ok(buf) // 返回缓冲区
+    }
+
+    /// 异步定位文件指针
+    async fn seek(&self, pos: u64) -> Result<(), std::io::Error> {
+        let file = unsafe { &mut *self.file_handler_ptr }; // 解指针
+        file.seek(tokio::io::SeekFrom::Start(pos)).await?; // 寻址到指定位置
+        Ok(())
+    }
+
+    /// 异步写入数据到文件
+    async fn write(&self, data: &[u8]) -> Result<(), std::io::Error> {
+        let file = unsafe { &mut *self.file_handler_ptr }; // 解指针
+        file.write_all(data).await?; // 写入全部数据
+        file.flush().await?; // 刷新缓冲区
+        Ok(())
+    }
+
+    /// 转换为 V8 External 对象
+    ///
+    /// 这允许我们将 Rust 指针存储在 V8 值中
+    fn to_v8_external<'s>(self, scope: &mut v8::HandleScope<'s>) -> v8::Local<'s, v8::External> {
+        let ptr = self.into_raw() as *mut _; // 获取指针
+        v8::External::new(scope, ptr) // 创建 V8 External
+    }
+
+    /// 转换为原始指针（并放弃所有权）
+    fn into_raw(self) -> *mut () {
+        self.file_handler_ptr as *mut _
+    }
+
+    /// 从原始指针还原 File 对象
+    unsafe fn from_raw(ptr: *mut ()) -> Self {
+        Self {
+            file_handler_ptr: ptr as *mut _,
+        }
+    }
+}
+
+/// 从 V8 External 转换为 Rust 引用
+impl From<v8::External> for &mut File {
+    fn from(external: v8::External) -> Self {
+        let ptr = external.value() as *mut File;
+        unsafe { &mut *ptr }
+    }
+}
+
 /// 从 V8 函数回调中提取内部字段中存储的文件处理器
 ///
 /// 文件处理器存储在 V8 对象的内部字段 0 中作为 External
@@ -128,77 +199,6 @@ fn create_file_handler_template(scope: &mut v8::HandleScope<()>) -> v8::Global<O
     template.set(file_seek_fn_name.into(), file_seek_fn.into());
 
     Global::new(scope, template) // 包装为 Global
-}
-
-/// Rust 文件处理器包装
-///
-/// 将 tokio::fs::File 包装为可跨线程的对象
-struct File {
-    file_handler_ptr: *mut tokio::fs::File, // 文件指针
-}
-
-unsafe impl Send for File {} // 允许在线程间发送
-unsafe impl Sync for File {} // 允许多线程访问
-
-impl File {
-    /// 从文件描述符创建 File 对象
-    fn new(fd: i32) -> Self {
-        let file = unsafe { tokio::fs::File::from_raw_fd(fd) }; // 从 FD 创建 File
-        let file_handler_ptr = Box::into_raw(Box::new(file)); // 分配到堆并获取指针
-        Self { file_handler_ptr }
-    }
-
-    /// 异步读取文件的全部内容
-    async fn read_to_end(&self) -> Result<Vec<u8>, std::io::Error> {
-        let file = unsafe { &mut *self.file_handler_ptr }; // 解指针
-        let mut buf = Vec::new(); // 创建缓冲区
-        file.seek(tokio::io::SeekFrom::Start(0)).await?; // 寻址到开始
-        file.read_to_end(&mut buf).await?; // 读取到缓冲区
-        Ok(buf) // 返回缓冲区
-    }
-
-    /// 异步定位文件指针
-    async fn seek(&self, pos: u64) -> Result<(), std::io::Error> {
-        let file = unsafe { &mut *self.file_handler_ptr }; // 解指针
-        file.seek(tokio::io::SeekFrom::Start(pos)).await?; // 寻址到指定位置
-        Ok(())
-    }
-
-    /// 异步写入数据到文件
-    async fn write(&self, data: &[u8]) -> Result<(), std::io::Error> {
-        let file = unsafe { &mut *self.file_handler_ptr }; // 解指针
-        file.write_all(data).await?; // 写入全部数据
-        file.flush().await?; // 刷新缓冲区
-        Ok(())
-    }
-
-    /// 转换为 V8 External 对象
-    ///
-    /// 这允许我们将 Rust 指针存储在 V8 值中
-    fn to_v8_external<'s>(self, scope: &mut v8::HandleScope<'s>) -> v8::Local<'s, v8::External> {
-        let ptr = self.into_raw() as *mut _; // 获取指针
-        v8::External::new(scope, ptr) // 创建 V8 External
-    }
-
-    /// 转换为原始指针（并放弃所有权）
-    fn into_raw(self) -> *mut () {
-        self.file_handler_ptr as *mut _
-    }
-
-    /// 从原始指针还原 File 对象
-    unsafe fn from_raw(ptr: *mut ()) -> Self {
-        Self {
-            file_handler_ptr: ptr as *mut _,
-        }
-    }
-}
-
-/// 从 V8 External 转换为 Rust 引用
-impl From<v8::External> for &mut File {
-    fn from(external: v8::External) -> Self {
-        let ptr = external.value() as *mut File;
-        unsafe { &mut *ptr }
-    }
 }
 
 /// 从函数参数中提取 External 数据
