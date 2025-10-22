@@ -86,7 +86,7 @@ impl JsRuntime {
             .create_first_module(scope, entry_script_path)
             .unwrap();
 
-        // 执行模块（顶级代码）
+        // 执行模块（顶级代码），主要用于: 执行模块的顶层代码（变量声明、初始化等）、处理模块的导入/导出、但不会自动调用导出的函数
         module.evaluate(scope).unwrap();
 
         let module_namespace = module.get_module_namespace(); // 获取 js 模块导出的命名空间

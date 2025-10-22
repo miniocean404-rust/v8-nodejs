@@ -165,7 +165,7 @@ impl AsyncTaskDispatcher for TokioAsyncTaskManager {
                     }
                 }
 
-                // perform_microtask_checkpoint: 手动触发添加到微任务队列的 Promise 的处理
+                // perform_microtask_checkpoint: 强制让 V8 清空微任务队列，立即执行所有 pending 的 then/catch/queueMicrotask 这样相关的回调
                 isolate.perform_microtask_checkpoint();
             }
         }
