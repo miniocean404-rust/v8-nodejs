@@ -1,54 +1,35 @@
-mod builtin; // 导入内置模块（异步任务、文件系统）
-mod global; // 导入全局模块（全局函数、模块加载）
-mod helper; // 导入辅助宏
+mod builtin;
+mod global;
+mod helper;
 
-use builtin::async_task::{AsyncTaskDispatcher, TokioAsyncTaskManager}; // 异步任务管理
-use global::inject_global_values; // 注入全局值的函数
-use global::module_loader::{host_initialize_import_meta_object_callback, ModuleLoader}; // 模块加载
-use v8::{self, ContextOptions, Local, OwnedIsolate, Value}; // V8 类型
+use builtin::async_task::{AsyncTaskDispatcher, TokioAsyncTaskManager};
+use global::inject_global_values;
+use global::module_loader::{host_initialize_import_meta_object_callback, ModuleLoader};
+use v8::{self, ContextOptions, Local, OwnedIsolate, Value};
 
-/// JS 运行时结构体，支持泛型异步管理器
-///
-/// 参数 D: 异步任务调度器（默认为 TokioAsyncTaskManager）
 pub struct JsRuntime<D: AsyncTaskDispatcher = TokioAsyncTaskManager> {
-    isolate: v8::OwnedIsolate, // V8 隔离区（独立的 JS 执行环境），自动管理 Isolate 的创建和销毁
-    task_dispatcher: D,        // 异步任务调度器
+    // V8 隔离区（独立的 JS 执行环境），自动管理 Isolate 的创建和销毁
+    isolate: v8::OwnedIsolate,
+    // 异步任务调度器
+    task_dispatcher: D,
 }
 
 impl<D: AsyncTaskDispatcher> Default for JsRuntime<D> {
+    // 初始化 V8 引擎
     fn default() -> Self {
-        // 初始化 V8 引擎
         let platform = v8::new_default_platform(0, false).make_shared(); // 创建 V8 平台，参数 0 表示线程数，false 表示不启用调试
         v8::V8::initialize_platform(platform); // 初始化 V8 平台
         v8::V8::initialize(); // 初始化 V8 引擎
 
-        // 创建一个新的 Isolate
-        let isolate = v8::Isolate::new(Default::default()); // 创建 V8 隔离区（隔离的 JS 执行环境）
+        // 创建 V8 隔离区（隔离的 JS 执行环境）
+        let isolate = v8::Isolate::new(Default::default());
 
         Self {
             isolate,
-            task_dispatcher: D::default(), // 创建默认的异步任务管理器
+            // 创建默认的异步任务管理器
+            task_dispatcher: D::default(),
         }
     }
-}
-
-// TODO - 待完成的动态 import() 处理
-/// 处理动态 import() 的回调函数
-///
-/// # 参数
-/// - `scope`: V8 作用域，用于 GC 跟踪
-/// - `host_defined_options`: 主机定义的选项
-/// - `resource_name`: 资源名称（通常是文件名）
-/// - `specifier`: 模块标识符（import() 中的字符串）
-/// - `import_assertions`: import 断言（ES2023 功能）
-fn host_import_module_dynamically_callback_example<'s>(
-    _scope: &mut v8::HandleScope<'s>,
-    _host_defined_options: v8::Local<'s, v8::Data>,
-    _resource_name: v8::Local<'s, v8::Value>,
-    _specifier: v8::Local<'s, v8::String>,
-    _import_assertions: v8::Local<'s, v8::FixedArray>,
-) -> Option<v8::Local<'s, v8::Promise>> {
-    todo!() // 标记为未实现
 }
 
 impl JsRuntime {
@@ -142,4 +123,23 @@ impl JsRuntime {
 
         result // 返回 main 函数的执行结果
     }
+}
+
+// TODO - 待完成的动态 import() 处理
+/// 处理动态 import() 的回调函数
+///
+/// # 参数
+/// - `scope`: V8 作用域，用于 GC 跟踪
+/// - `host_defined_options`: 主机定义的选项
+/// - `resource_name`: 资源名称（通常是文件名）
+/// - `specifier`: 模块标识符（import() 中的字符串）
+/// - `import_assertions`: import 断言（ES2023 功能）
+fn host_import_module_dynamically_callback_example<'s>(
+    _scope: &mut v8::HandleScope<'s>,
+    _host_defined_options: v8::Local<'s, v8::Data>,
+    _resource_name: v8::Local<'s, v8::Value>,
+    _specifier: v8::Local<'s, v8::String>,
+    _import_assertions: v8::Local<'s, v8::FixedArray>,
+) -> Option<v8::Local<'s, v8::Promise>> {
+    todo!() // 标记为未实现
 }

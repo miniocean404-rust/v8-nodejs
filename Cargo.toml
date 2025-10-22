@@ -5,5 +5,5 @@ edition = "2021"
 
 [dependencies]
 v8 = "130.0.7"
-tokio = { version = "1.43.0", features = ["full"] }
+tokio = { version = "1.48.0", features = ["full"] }
 dashmap = "6.1.0"
